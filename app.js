@@ -262,6 +262,7 @@
         return parser(res);
       }).then(function (vertices) {
         model = makeMeshModel(vertices, path.split("/").pop());
+        waitingForMesh = false;
         setTimeout(function () {
           setModelStatus("Loaded real triangle mesh: " + model.name + " / " + model.count.toLocaleString() + " vertices.");
         }, 0);
@@ -276,31 +277,45 @@
           if (!res.ok) throw new Error(name + " returned " + res.status);
           return res.arrayBuffer();
         }).then(function (buffer) {
-          return parseStl(buffer, true);
+          return { name: name, vertices: parseStl(buffer, true) };
+        }).catch(function (err) {
+          return { name: name, error: err.message || String(err) };
         });
       });
 
-      return Promise.all(loads).then(function (parts) {
+      return Promise.all(loads).then(function (results) {
         var merged = [];
         var mergedGroups = [];
-        parts.forEach(function (vertices, index) {
-          var group = partGroup(names[index]);
+        var loaded = [];
+        var failed = [];
+        results.forEach(function (part) {
+          if (part.error) {
+            failed.push(part.name);
+            return;
+          }
+          loaded.push(part.name);
+          var vertices = part.vertices;
+          var group = partGroup(part.name);
           for (var i = 0; i < vertices.length; i++) merged.push(vertices[i]);
           for (var g = 0; g < vertices.length / 3; g++) mergedGroups.push(group);
         });
-        model = makeMeshModel(normalizeVertices(merged), names.length + " SolidWorks STL parts", mergedGroups);
-        setModelStatus("Loaded real SolidWorks assembly mesh: " + names.length + " parts / " + model.count.toLocaleString() + " vertices.");
+        if (!loaded.length) throw new Error("No STL assembly parts loaded.");
+        model = makeMeshModel(normalizeVertices(merged), loaded.length + " SolidWorks STL parts", mergedGroups);
+        waitingForMesh = false;
+        var suffix = failed.length ? "，缺少 " + failed.length + " 个零件，请检查 GitHub assets 上传是否完整。" : "";
+        setModelStatus("真实 SolidWorks 装配体已加载: " + loaded.length + " 个零件 / " + model.count.toLocaleString() + " vertices" + suffix);
       });
     }
 
-    var model = makePointCloudModel(data);
-    var pointCount = model.count;
+    var fallbackModel = makePointCloudModel(data);
+    var model = null;
+    var waitingForMesh = true;
+    var pointCount = fallbackModel.count;
 
     // 更新数据来源状态
     var modelStatus = document.getElementById("modelStatus");
     if (modelStatus) {
-      modelStatus.textContent =
-        data.source + " · " + pointCount.toLocaleString() + " 点";
+      modelStatus.textContent = "正在加载真实 SolidWorks STL 模型，请稍等...";
     }
 
     // ── 方向向量 & 颜色（6 组）───────────────────────────────
@@ -341,7 +356,9 @@
     }).catch(function () {
       return loadAssemblyStlParts(assemblyStlParts);
     }).catch(function () {
-      setModelStatus("No STL/OBJ mesh found. Export assets/micro-gear-pump.stl or .obj; showing point-cloud fallback only.");
+      model = fallbackModel;
+      waitingForMesh = false;
+      setModelStatus("没有加载到 STL/OBJ 实体模型，正在显示点云兜底预览: " + pointCount.toLocaleString() + " 点。");
     });
 
     var groupDirs = [
@@ -456,6 +473,10 @@
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.DEPTH_TEST);
       gl.disable(gl.CULL_FACE);
+      if (!model) {
+        requestAnimationFrame(render);
+        return;
+      }
       if (model.kind === "points") {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
